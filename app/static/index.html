@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>图像置乱算法 AI 安全评价系统</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>图像置乱算法 AI 安全评价系统</h1>
+    <p class="subtitle">导入数据集 → 置乱 → AI 评估 → 指标显示（大模型识别率是否接近 50%）</p>
+  </header>
+
+  <main class="grid">
+
+    <!-- 模块① 数据导入 -->
+    <section class="card">
+      <h2><span class="badge">①</span> 数据导入</h2>
+      <p class="hint">上传猫狗数据集 zip（内含 Cat / Dog 两个文件夹），自动规范化 224×224 并按 8:2 划分。</p>
+      <input type="file" id="import-file" accept=".zip">
+      <div class="row">
+        <label>每类图片数上限
+          <input type="number" id="max-per-class" placeholder="留空=全量" min="1">
+        </label>
+        <button id="btn-import" class="btn primary">导入数据集</button>
+      </div>
+      <div class="status" id="import-status">未导入</div>
+      <div class="progress"><div class="bar" id="import-bar"></div></div>
+    </section>
+
+    <!-- 模块② 图像置乱 -->
+    <section class="card">
+      <h2><span class="badge">②</span> 图像置乱</h2>
+      <p class="hint">选择算法与参数梯度，点击按钮批量置乱（Arnold 周期 T=24，参数取半周期内）。</p>
+      <div class="row">
+        <label>算法
+          <select id="algo"><option value="arnold">Arnold 变换</option></select>
+        </label>
+      </div>
+      <div id="iterations" class="chips"></div>
+      <button id="btn-scramble" class="btn primary">开始置乱</button>
+      <div class="status" id="scramble-status">未置乱</div>
+      <div class="progress"><div class="bar" id="scramble-bar"></div></div>
+    </section>
+
+    <!-- 模块③ AI 评估 -->
+    <section class="card">
+      <h2><span class="badge">③</span> AI 评估</h2>
+      <p class="hint">从零训练 ResNet 二分类器（原始基线 + 各置乱变体），计算测试集识别率。</p>
+      <div class="row">
+        <label>模型
+          <select id="arch">
+            <option value="resnet18">ResNet-18（快）</option>
+            <option value="resnet50">ResNet-50</option>
+          </select>
+        </label>
+        <label>轮数 <input type="number" id="epochs" value="3" min="1"></label>
+      </div>
+      <div class="row">
+        <label>批大小 <input type="number" id="batch-size" value="16" min="1"></label>
+        <label>学习率 <input type="number" id="lr" value="0.001" step="0.0001"></label>
+      </div>
+      <button id="btn-evaluate" class="btn primary">开始 AI 评估</button>
+      <div class="status" id="evaluate-status">未评估</div>
+      <div class="progress"><div class="bar" id="evaluate-bar"></div></div>
+    </section>
+
+    <!-- 模块④ 指标显示 -->
+    <section class="card wide">
+      <h2><span class="badge">④</span> 指标显示</h2>
+      <div class="row">
+        <button id="btn-metrics" class="btn">刷新指标</button>
+        <span class="status inline" id="metrics-status"></span>
+      </div>
+      <div class="metrics-grid">
+        <div class="chart-box">
+          <h3>置乱参数 — 大模型识别率</h3>
+          <svg id="chart" viewBox="0 0 640 360" preserveAspectRatio="xMidYMid meet"></svg>
+        </div>
+        <div class="ranking-box">
+          <h3>安全性排名（越接近 50% 越安全）</h3>
+          <table id="ranking-table">
+            <thead><tr><th>排名</th><th>迭代次数</th><th>识别率</th><th>距 50%</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <table id="metrics-table">
+        <thead><tr><th>数据集</th><th>识别率</th><th>安全性解读</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

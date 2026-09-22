@@ -1,0 +1,11 @@
+# 图像置乱算法 AI 安全评价平台 —— 依赖清单
+# 已在 Python 3.11 环境验证：torch 2.12.0+cpu / torchvision 0.27.0+cpu
+torch>=2.0
+torchvision>=0.15
+numpy>=1.24
+Pillow>=9.0
+matplotlib>=3.5         # 仅可视化绘图需要，缺失时平台会降级为仅输出 CSV
+# Web 系统（FastAPI + 前端）
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9  # 文件上传必需
