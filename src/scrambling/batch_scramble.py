@@ -27,7 +27,7 @@ def _load_rgb(path):
 
 
 def scramble_dataset(raw_dir=None, out_root=None, iterations=None,
-                     algorithm="arnold", image_size=None, progress_callback=None):
+                     algorithm="arnold", image_size=None, progress_callback=None, cancel_callback=None):
     """对 raw_dir 下的 train/test 数据集，按每个迭代参数生成置乱副本。
 
     progress_callback : callable(percent: float, message: str) | None
@@ -47,7 +47,8 @@ def scramble_dataset(raw_dir=None, out_root=None, iterations=None,
 
     # 统计源图片总数，用于进度计算
     src_files = []
-    for split in ("train", "test"):
+    splits = ("train", "val", "test") if (raw_dir / "val").is_dir() else ("train", "test")
+    for split in splits:
         src_split = raw_dir / split
         if src_split.is_dir():
             for cls_dir in src_split.iterdir():
@@ -70,7 +71,7 @@ def scramble_dataset(raw_dir=None, out_root=None, iterations=None,
                   f"已接近/越过还原点，建议使用 {T // 2} 以内的值。")
         dst_root = out_root / f"{algorithm}_{k:02d}"
         total = 0
-        for split in ("train", "test"):
+        for split in splits:
             src_split = raw_dir / split
             if not src_split.is_dir():
                 continue
@@ -78,6 +79,8 @@ def scramble_dataset(raw_dir=None, out_root=None, iterations=None,
                 dst_cls = dst_root / split / cls_dir.name
                 dst_cls.mkdir(parents=True, exist_ok=True)
                 for f in sorted(cls_dir.glob("*")):
+                    if cancel_callback:
+                        cancel_callback()
                     try:
                         arr = _load_rgb(f)
                         out = scramble(arr, k)
@@ -91,6 +94,8 @@ def scramble_dataset(raw_dir=None, out_root=None, iterations=None,
                                           f"迭代 {k} 置乱 {done}/{total_work}")
         print(f"  迭代 {k:>2}: 生成 {total} 张 -> {dst_root}")
 
+    if cancel_callback:
+        cancel_callback()
     meta_path = out_root / "metadata.json"
     meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"[batch_scramble] 元信息已写入 {meta_path}")

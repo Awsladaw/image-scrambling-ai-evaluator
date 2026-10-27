@@ -1,5 +1,5 @@
 # 图像置乱算法 AI 安全评价平台 —— 依赖清单
-# 已在 Python 3.11 环境验证：torch 2.12.0+cpu / torchvision 0.27.0+cpu
+# 当前本地验证环境：Python 3.12 / torch 2.14.1+cpu / torchvision 0.29.1+cpu
 torch>=2.0
 torchvision>=0.15
 numpy>=1.24

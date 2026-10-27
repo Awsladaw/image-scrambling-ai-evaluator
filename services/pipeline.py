@@ -1,36 +1,30 @@
-"""业务编排层：把「数据导入 / 置乱 / AI评估 / 指标」四个模块组装成统一流程。
-
-本层不依赖任何 Web 框架，仅调用 src/ 下的算法模块，可独立测试。
-前端 / API 层只负责调用本层函数，从而实现「界面与算法解耦」。
-"""
-
+"""数据导入、置乱、训练编排；每次执行创建独立版本，完成后发布。"""
 import json
-import shutil
-import sys
+import time
 from pathlib import Path
+import config
+from src.data import prepare
+from src.scrambling import batch_scramble
+from src import train
+from services import storage
+from src.task_control import JobCancelled, check_cancelled, begin_commit, track_output
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-
-import config  # noqa: E402
-from src.data import prepare  # noqa: E402
-from src.scrambling import batch_scramble  # noqa: E402
-from src import train  # noqa: E402
-
-# 支持的置乱算法名 -> 内部标识
 ALGORITHMS = {"arnold": "arnold"}
 
 
-# ---------------- 基础状态查询 ----------------
+def _dataset():
+    dataset = storage.active_dataset()
+    if not dataset:
+        raise ValueError("请先导入完整的数据集")
+    return dataset
 
-def _scrambled_variants():
-    """返回已生成的置乱变体 [(label, dir), ...]，label 为迭代次数字符串。"""
-    variants = []
-    if config.SCRAMBLED_DIR.exists():
-        for d in sorted(config.SCRAMBLED_DIR.glob("arnold_*")):
-            if d.is_dir():
-                variants.append((d.name.replace("arnold_", ""), d))
-    return variants
+
+def _scrambled_variants(dataset=None):
+    dataset = dataset or storage.active_dataset()
+    if not dataset or not dataset.get("scrambled_dir"):
+        return []
+    return [(d.name.replace("arnold_", ""), d)
+            for d in sorted(Path(dataset["scrambled_dir"]).glob("arnold_*")) if d.is_dir()]
 
 
 def get_scrambled_labels():
@@ -38,137 +32,134 @@ def get_scrambled_labels():
 
 
 def get_evaluated_labels():
-    """返回已评估（存在 metrics.json）的标签列表。"""
-    labels = []
-    results_dir = config.RESULTS_DIR / "arnold"
-    if results_dir.exists():
-        for sub in sorted(results_dir.iterdir()):
-            if (sub / "metrics.json").exists():
-                labels.append(sub.name)
-    return labels
+    return [r["label"] for r in get_metrics()["rows"]]
 
 
-# ---------------- 四大业务动作 ----------------
-
-def reset_workspace():
-    """清空当前工作区（原始/置乱/结果/模型），导入新数据集前调用。"""
-    for p in (config.RAW_DIR, config.SCRAMBLED_DIR, config.RESULTS_DIR, config.MODEL_DIR):
-        if p.exists():
-            shutil.rmtree(p)
-
-
-def import_dataset(zip_path, max_per_class=None, job=None):
-    """动作①：导入数据集。job 需提供 set_progress(percent, message)。"""
-    reset_workspace()
-
-    def cb(p, m):
-        if job:
-            job.set_progress(p, m)
-
-    raw = prepare.import_dataset(zip_path, max_per_class=max_per_class,
-                                 progress_callback=cb, force=True)
-    return {"raw": str(raw)}
+def import_dataset(zip_path, max_per_class=None, job=None, source_name=None, validation_ratio=0.0):
+    check_cancelled(job)
+    storage.catalog()
+    dataset_id = storage.new_id("dataset")
+    root = config.DATA_ROOT / "datasets" / dataset_id
+    track_output(job, root)
+    raw = prepare.import_dataset(
+        zip_path, data_root=root, max_per_class=max_per_class,
+        progress_callback=job.set_progress if job else None, validation_ratio=validation_ratio,
+        cancel_callback=lambda: check_cancelled(job))
+    if not storage.is_ready(raw):
+        raise ValueError("导入后训练集或测试集为空；请增加样本量并检查图片是否损坏")
+    dataset = {"id": dataset_id, "name": source_name or Path(zip_path).name,
+               "created_at": time.time(), "status": "ready", "raw_dir": str(raw),
+               "counts": storage.counts(raw), "scrambled_dir": None,
+               "scramble_id": None, "active_experiment": None,
+               "max_per_class": max_per_class, "image_size": config.IMAGE_SIZE,
+               "seed": config.SEED, "split_ratio": config.SPLIT_RATIO,
+               "validation_ratio": validation_ratio}
+    begin_commit(job)
+    storage.write_json(root / "dataset.json", dataset)
+    storage.publish_dataset(dataset)
+    return {"raw": str(raw), "dataset_id": dataset_id, "counts": dataset["counts"]}
 
 
 def run_scramble(algorithm="arnold", iterations=None, job=None):
-    """动作②：批量置乱。"""
-    iterations = iterations or config.ARNOLD_ITERATIONS
-
-    def cb(p, m):
-        if job:
-            job.set_progress(p, m)
-
-    meta = batch_scramble.scramble_dataset(iterations=iterations, algorithm=algorithm,
-                                           progress_callback=cb)
-    return meta
+    check_cancelled(job)
+    dataset = _dataset()
+    scramble_id = storage.new_id("scramble")
+    out_root = config.DATA_ROOT / "datasets" / dataset["id"] / "scrambles" / scramble_id
+    track_output(job, out_root)
+    meta = batch_scramble.scramble_dataset(
+        raw_dir=dataset["raw_dir"], out_root=out_root,
+        iterations=iterations or config.ARNOLD_ITERATIONS, algorithm=algorithm,
+        progress_callback=job.set_progress if job else None,
+        cancel_callback=lambda: check_cancelled(job))
+    for k in meta["iterations"]:
+        if storage.counts(out_root / f"{algorithm}_{k:02d}") != dataset["counts"]:
+            raise RuntimeError("置乱图像数量与原始数据不一致，旧版本仍保留")
+    begin_commit(job)
+    storage.update_dataset(dataset["id"], scrambled_dir=str(out_root),
+                           scramble_id=scramble_id, active_experiment=None)
+    return {**meta, "scramble_id": scramble_id}
 
 
 def run_evaluate(arch=None, epochs=None, batch_size=None, lr=None,
-                 optimizer=None, job=None, include_baseline=True):
-    """动作③：AI 评估。训练「原始基线 + 各置乱变体」，汇总识别率。"""
-    arch = arch or config.ARCH
-    epochs = epochs if epochs is not None else config.EPOCHS
-    batch_size = batch_size or config.BATCH_SIZE
-    lr = lr or config.LEARNING_RATE
+                 optimizer=None, job=None, include_baseline=True, image_size=None):
+    dataset = _dataset()
+    arch, epochs = arch or config.ARCH, epochs if epochs is not None else config.EPOCHS
+    batch_size, lr = batch_size or config.BATCH_SIZE, lr or config.LEARNING_RATE
     optimizer = optimizer or config.OPTIMIZER
-
-    algo = "arnold"
-    units = []
-    if include_baseline:
-        units.append(("original", config.RAW_DIR))
-    units += _scrambled_variants()
-
+    image_size = image_size or config.IMAGE_SIZE
+    units = [("original", Path(dataset["raw_dir"]))] if include_baseline else []
+    units += _scrambled_variants(dataset)
     if not units:
-        raise RuntimeError("没有可评估的数据，请先导入数据集并执行置乱")
-
-    total_epochs = len(units) * epochs
-    done_epochs = [0]  # 用可变容器累计已完成的 epoch 数
-
+        raise ValueError("没有可评估数据，请先执行置乱")
+    experiment_id = storage.new_id("experiment")
+    root = storage.experiment_root() / experiment_id
+    track_output(job, root)
+    record = {"id": experiment_id, "dataset_id": dataset["id"],
+              "dataset_name": dataset["name"], "counts": dataset["counts"],
+              "scramble_id": dataset.get("scramble_id"), "created_at": time.time(),
+              "status": "running", "algorithm": "arnold", "results_dir": str(root / "arnold"),
+              "parameters": {"arch": arch, "epochs": epochs, "batch_size": batch_size,
+                             "lr": lr, "optimizer": optimizer, "device": config.DEVICE,
+                             "image_size": image_size, "seed": config.SEED,
+                             "selection_split": "val" if "val" in dataset["counts"] else "test"},
+              "variants": [label for label, _ in units]}
+    storage.save_experiment(record)
     summary = []
-    for label, data_dir in units:
-        def cb(p, m):
-            frac = (done_epochs[0] + p / 100.0) / total_epochs
-            if job:
-                job.set_progress(frac * 100.0, f"[{label}] {m}")
+    try:
+        for index, (label, data_dir) in enumerate(units):
+            check_cancelled(job)
+            def cb(percent, message, index=index, label=label):
+                if job:
+                    job.set_progress((index + percent / 100) / len(units) * 100,
+                                     f"[{label}] {message}")
+            metrics = train.run(data_dir=data_dir, out_dir=root / "arnold" / label,
+                                arch=arch, epochs=epochs, batch_size=batch_size,
+                                lr=lr, optimizer=optimizer, image_size=image_size, progress_callback=cb,
+                                cancel_callback=lambda: check_cancelled(job))
+            summary.append({"label": label, "test_acc": metrics["best_test_acc"]})
+        _save_summary(summary, root / "arnold_summary.csv")
+        begin_commit(job)
+        record.update(status="done", finished_at=time.time())
+        storage.save_experiment(record)
+        storage.update_dataset(dataset["id"], active_experiment=experiment_id)
+    except Exception as exc:
+        record.update(status="cancelled" if isinstance(exc, JobCancelled) else "error",
+                      error=str(exc), finished_at=time.time())
+        storage.save_experiment(record)
+        raise
+    return {"experiment_id": experiment_id, "summary": summary, "ranking": _ranking(summary)}
 
-        out_dir = config.RESULTS_DIR / algo / label
-        metrics = train.run(data_dir=data_dir, out_dir=out_dir, arch=arch,
-                            epochs=epochs, batch_size=batch_size, lr=lr,
-                            optimizer=optimizer, progress_callback=cb)
-        done_epochs[0] += epochs
-        summary.append({"label": label, "test_acc": metrics["best_test_acc"]})
 
-    # 保存汇总
-    _save_summary(summary)
-    return {"summary": summary, "ranking": _ranking(summary)}
-
-
-def _save_summary(summary):
-    out = config.RESULTS_DIR / "arnold_summary.csv"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    with out.open("w", encoding="utf-8") as f:
-        f.write("label,recognition_rate\n")
-        for row in summary:
-            f.write(f"{row['label']},{row['test_acc']:.4f}\n")
+def _save_summary(summary, path):
+    Path(path).write_text("label,recognition_rate\n" + "".join(
+        f"{r['label']},{r['test_acc']:.4f}\n" for r in summary), encoding="utf-8")
 
 
 def _ranking(summary):
-    """按「识别率距离 50% 越近越安全」排序（排除原始基线）。"""
-    scrambled = [r for r in summary if r["label"] != "original"]
-    return sorted(scrambled, key=lambda r: abs(r["test_acc"] - 0.5))
+    return sorted((r for r in summary if r["label"] != "original"),
+                  key=lambda r: abs(r["test_acc"] - 0.5))
 
 
-# ---------------- 动作④：指标查询 ----------------
-
-def get_metrics():
-    """读取已评估结果，返回曲线数据 + 安全性排名。"""
-    algo = "arnold"
-    results_dir = config.RESULTS_DIR / algo
+def get_metrics(experiment_id=None):
+    dataset = storage.active_dataset()
+    experiment_id = experiment_id or (dataset or {}).get("active_experiment")
+    experiment = storage.experiment(experiment_id) if experiment_id else None
+    if experiment_id and not experiment:
+        raise ValueError("实验不存在")
     rows = []
-    if results_dir.exists():
-        for sub in sorted(results_dir.iterdir()):
-            mf = sub / "metrics.json"
-            if not mf.exists():
-                continue
+    if experiment:
+        for mf in sorted(Path(experiment["results_dir"]).glob("*/metrics.json")):
             m = json.loads(mf.read_text(encoding="utf-8"))
-            label = sub.name
-            try:
-                iters = int(label)
-            except ValueError:
-                iters = None  # 原始基线 original
-            rows.append({
-                "label": label,
-                "iterations": iters,
-                "test_acc": m.get("best_test_acc"),
-                "arch": m.get("arch"),
-            })
-
-    # 排序：原始基线（iterations=None）在前，其余按迭代次数升序
-    rows.sort(key=lambda r: (r["iterations"] is not None,
-                             r["iterations"] if r["iterations"] is not None else -1))
-
-    scrambled = [r for r in rows if r["iterations"] is not None]
-    ranking = sorted(scrambled, key=lambda r: abs(r["test_acc"] - 0.5))
-
-    return {"rows": rows, "ranking": ranking, "baseline": 0.5,
-            "algorithm": algo}
+            label = mf.parent.name
+            report = m.get('test_report', {})
+            per_class = list(report.get('per_class', {}).values())
+            def macro(key):
+                return report.get('macro_' + key, sum(v[key] for v in per_class) / len(per_class) if per_class else None)
+            rows.append({"label": label, "iterations": int(label) if label.isdigit() else None,
+                         "test_acc": m.get("best_test_acc"), "arch": m.get("arch"),
+                         'precision': macro('precision'), 'recall': macro('recall'), 'f1': macro('f1'),
+                         'total': report.get('total'), 'confusion_matrix': report.get('confusion_matrix'),
+                         'classes': report.get('confusion_matrix_order')})
+    rows.sort(key=lambda r: -1 if r["iterations"] is None else r["iterations"])
+    return {"rows": rows, "ranking": _ranking(rows), "baseline": 0.5,
+            "algorithm": "arnold", "experiment": experiment}

@@ -2,6 +2,7 @@
 
 import torch
 import torch.nn as nn
+from pathlib import Path
 from torch.utils.data import DataLoader
 from torchvision import datasets, models, transforms
 
@@ -48,12 +49,22 @@ def get_dataloaders(data_dir, image_size, batch_size, num_workers=0):
     return train_loader, test_loader, train_ds.classes
 
 
+def get_validation_loader(data_dir, image_size, batch_size, num_workers=0):
+    folder = Path(data_dir) / "val"
+    if not folder.is_dir():
+        return None
+    dataset = datasets.ImageFolder(str(folder), transform=get_transforms(image_size)["eval"])
+    return DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+
+
 @torch.no_grad()
-def evaluate(model, loader, device):
+def evaluate(model, loader, device, cancel_callback=None):
     """返回模型在 loader 上的分类准确率（识别率）。"""
     model.eval()
     correct = total = 0
     for x, y in loader:
+        if cancel_callback:
+            cancel_callback()
         x, y = x.to(device), y.to(device)
         correct += (model(x).argmax(1) == y).sum().item()
         total += y.size(0)

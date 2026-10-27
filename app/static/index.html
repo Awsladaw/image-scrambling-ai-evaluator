@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>图像置乱算法 AI 安全评价系统</title>
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="style.css?v=4">
 </head>
 <body>
   <header class="topbar">
@@ -13,17 +13,28 @@
   </header>
 
   <main class="grid">
+    <div class="task-panel wide">
+      <div id="task-notice" class="task-notice" role="status" aria-live="polite">正在连接服务…</div>
+      <button id="btn-stop-task" class="btn danger" disabled>停止当前任务</button>
+    </div>
 
     <!-- 模块① 数据导入 -->
     <section class="card">
       <h2><span class="badge">①</span> 数据导入</h2>
+      <label for="dataset-select">已保存的数据集</label>
+      <div class="row">
+        <select id="dataset-select" class="history-select" data-mutates><option value="">暂无数据集</option></select>
+        <button id="btn-select-dataset" class="btn" data-mutates disabled>切换数据集</button>
+      </div>
+      <p id="dataset-info" class="hint">暂无数据集</p>
       <p class="hint">上传猫狗数据集 zip（内含 Cat / Dog 两个文件夹），自动规范化 224×224 并按 8:2 划分。</p>
-      <input type="file" id="import-file" accept=".zip">
+      <p class="hint">每次导入保存为新版本，历史数据、置乱版本和实验结果均保留。</p>
+      <input type="file" id="import-file" accept=".zip" data-mutates>
       <div class="row">
         <label>每类图片数上限
-          <input type="number" id="max-per-class" placeholder="留空=全量" min="1">
+          <input type="number" id="max-per-class" placeholder="留空=全量" min="3" data-mutates>
         </label>
-        <button id="btn-import" class="btn primary">导入数据集</button>
+        <button id="btn-import" class="btn primary" data-mutates disabled>导入数据集</button>
       </div>
       <div class="status" id="import-status">未导入</div>
       <div class="progress"><div class="bar" id="import-bar"></div></div>
@@ -35,11 +46,11 @@
       <p class="hint">选择算法与参数梯度，点击按钮批量置乱（Arnold 周期 T=24，参数取半周期内）。</p>
       <div class="row">
         <label>算法
-          <select id="algo"><option value="arnold">Arnold 变换</option></select>
+          <select id="algo" data-mutates><option value="arnold">Arnold 变换</option></select>
         </label>
       </div>
       <div id="iterations" class="chips"></div>
-      <button id="btn-scramble" class="btn primary">开始置乱</button>
+      <button id="btn-scramble" class="btn primary" data-mutates disabled>开始置乱</button>
       <div class="status" id="scramble-status">未置乱</div>
       <div class="progress"><div class="bar" id="scramble-bar"></div></div>
     </section>
@@ -47,21 +58,57 @@
     <!-- 模块③ AI 评估 -->
     <section class="card">
       <h2><span class="badge">③</span> AI 评估</h2>
-      <p class="hint">从零训练 ResNet 二分类器（原始基线 + 各置乱变体），计算测试集识别率。</p>
+      <label for="evaluation-mode">评估方式</label>
+      <select id="evaluation-mode" class="history-select" data-mutates>
+        <option value="saved">使用已保存模型测试</option>
+        <option value="train">重新训练并评估</option>
+      </select>
+      <div id="saved-options">
+        <label for="saved-model">选择已训练模型</label>
+        <select id="saved-model" class="history-select" data-mutates><option value="">正在加载模型…</option></select>
+        <p id="saved-model-info" class="hint"></p>
+        <label for="evaluation-dataset">选择测试数据集（仅使用 test 部分）</label>
+        <select id="evaluation-dataset" class="history-select" data-mutates><option value="">正在加载数据集…</option></select>
+        <div class="row">
+          <label>测试内容
+            <select id="evaluation-conditions" class="mode-select" data-mutates>
+              <option value="both">原图 + 置乱图对照</option>
+              <option value="original">仅原图</option>
+              <option value="scrambled">仅置乱图</option>
+            </select>
+          </label>
+          <label>测试批大小 <input type="number" id="evaluation-batch-size" value="32" min="1" max="128" data-mutates></label>
+        </div>
+        <div id="saved-input-options">
+          <label for="evaluation-input">置乱图来源</label>
+          <select id="evaluation-input" class="history-select" data-mutates>
+            <option value="lossless">临时无损置乱（无需提前生成文件）</option>
+            <option value="saved">读取此数据集已保存的置乱图片</option>
+          </select>
+          <p class="hint">选择本次测试的 Arnold 次数：</p>
+          <div id="evaluation-iterations" class="chips"></div>
+        </div>
+        <p id="evaluation-preview" class="hint"></p>
+      </div>
+      <div id="train-options" hidden>
+      <p class="hint">从零训练 ResNet 二分类器（原始基线 + 已保存的各置乱变体），计算测试集识别率。训练后的模型会加入可选列表。</p>
       <div class="row">
         <label>模型
-          <select id="arch">
+          <select id="arch" data-mutates>
             <option value="resnet18">ResNet-18（快）</option>
             <option value="resnet50">ResNet-50</option>
           </select>
         </label>
-        <label>轮数 <input type="number" id="epochs" value="3" min="1"></label>
+        <label>轮数 <input type="number" id="epochs" value="3" min="1" data-mutates></label>
       </div>
       <div class="row">
-        <label>批大小 <input type="number" id="batch-size" value="16" min="1"></label>
-        <label>学习率 <input type="number" id="lr" value="0.001" step="0.0001"></label>
+        <label>批大小 <input type="number" id="batch-size" value="16" min="1" data-mutates></label>
+        <label>学习率 <input type="number" id="lr" value="0.001" step="0.0001" min="0.000001" data-mutates></label>
+        <label>输入尺寸 <input type="number" id="image-size" value="224" min="32" max="512" data-mutates></label>
       </div>
-      <button id="btn-evaluate" class="btn primary">开始 AI 评估</button>
+      </div>
+      <button id="btn-evaluate" class="btn primary" data-mutates disabled>开始模型测试</button>
+      <p id="training-profile" class="hint"></p>
       <div class="status" id="evaluate-status">未评估</div>
       <div class="progress"><div class="bar" id="evaluate-bar"></div></div>
     </section>
@@ -69,6 +116,13 @@
     <!-- 模块④ 指标显示 -->
     <section class="card wide">
       <h2><span class="badge">④</span> 指标显示</h2>
+      <label for="experiment-select">查看实验记录</label>
+      <select id="experiment-select" class="history-select"><option value="">当前数据集最新结果</option></select>
+      <p id="experiment-info" class="hint">暂无实验记录</p>
+      <div class="result-downloads">
+        <a id="download-evaluation-summary" class="btn" hidden>下载评估报告 JSON</a>
+        <a id="download-evaluation-predictions" class="btn" hidden>下载逐图预测 CSV</a>
+      </div>
       <div class="row">
         <button id="btn-metrics" class="btn">刷新指标</button>
         <span class="status inline" id="metrics-status"></span>
@@ -79,21 +133,26 @@
           <svg id="chart" viewBox="0 0 640 360" preserveAspectRatio="xMidYMid meet"></svg>
         </div>
         <div class="ranking-box">
-          <h3>安全性排名（越接近 50% 越安全）</h3>
+          <h3>与 50% 基线的距离（仅作识别性能参考）</h3>
           <table id="ranking-table">
             <thead><tr><th>排名</th><th>迭代次数</th><th>识别率</th><th>距 50%</th></tr></thead>
             <tbody></tbody>
           </table>
         </div>
       </div>
-      <table id="metrics-table">
-        <thead><tr><th>数据集</th><th>识别率</th><th>安全性解读</th></tr></thead>
+      <p class="hint">精确率、召回率和 F1 为两类的宏平均；未记录的历史指标显示为“—”。</p>
+      <div class="table-scroll"><table id="metrics-table">
+        <thead><tr><th>测试输入</th><th>识别率</th><th>精确率</th><th>召回率</th><th>F1</th><th>样本数</th><th>结果解读</th></tr></thead>
         <tbody></tbody>
-      </table>
+      </table></div>
+      <details id="confusion-details" hidden>
+        <summary>查看混淆矩阵（行：真实类别；列：预测类别）</summary>
+        <div id="confusion-matrices" class="confusion-grid"></div>
+      </details>
     </section>
 
   </main>
 
-  <script src="app.js"></script>
+  <script src="app.js?v=14"></script>
 </body>
 </html>
